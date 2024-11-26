@@ -1,0 +1,10 @@
+# Preparing Training Data
+clc;
+clear; 
+Folder='\\client\c$\Users\laure\Desktop\Undergrad\Sophmore Year\Spring 2022\BME3053C\PROJECT'; % (REPLACE WITH YOUR FILEPATH) define filepath to folder containing project data
+targetSize=[227 227]; %input size used for alexnet
+ground=load('groundtruthUSETHIS.mat'); %load ground truth containing 17 DX scans with visible nodules
+trainingDataTable=objectDetectorTrainingData(ground.gTruth); %store training data as table containing image datastore and box label datastore
+trainingDataTable=table2cell(trainingDataTable);
+resized=resizeImageAndLabel(trainingDataTable,targetSize,Folder); %resize images to be same size (also fix bounding boxes)
+clear trainingDataTable
