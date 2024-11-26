@@ -8,3 +8,226 @@ trainingDataTable=objectDetectorTrainingData(ground.gTruth); %store training dat
 trainingDataTable=table2cell(trainingDataTable);
 resized=resizeImageAndLabel(trainingDataTable,targetSize,Folder); %resize images to be same size (also fix bounding boxes)
 clear trainingDataTable
+
+#created "lgraph" to use for trainig
+imds=imageDatastore(resized(:,1)); %create image datastore containing resized ground truth images
+resized=cell2table(resized);
+blds = boxLabelDatastore(resized(:,2)); %create box label datastore containing resized ground truth boxes
+trainingData=combine(imds,blds);
+inputSize=[227 227 3]; %define input size for lgraph
+numAnchors = 12; %define number of anchors
+anchorBoxes = estimateAnchorBoxes(trainingData,numAnchors); %estimate anchor boxes using resized ground truth data
+featureExtractionNetwork=alexnet; %define alexnet as feature extraction network (use this information for lgraph)
+featureLayer='relu5'; %relu5 is a layer in alexnet that we are using to create the lgraph
+numClasses=1; %our images only have one class
+lgraph = fasterRCNNLayers(inputSize,numClasses,anchorBoxes,featureExtractionNetwork,featureLayer); %create lgraph using information defined above
+
+# Augmented Data and saved
+data=readall(trainingData); %read training data
+augmentedTrainingData= transform(trainingData,@imageFlip); %augment training data
+data1=readall(augmentedTrainingData); %read augmented training data
+augmentedTrainingData=transform(trainingData,@imageFlip); %augment training data
+data2=readall(augmentedTrainingData); %read augmented training data
+augmentedTrainingData=transform(trainingData,@imageFlip); %augment training data
+data3=readall(augmentedTrainingData); %read augmented training data
+fulldata=[data;data1;data2;data3]; %concatenate the seperate data variables to make fulldata
+clear data data1 data2 resized trainingData augmentedTrainingData imds blds ground imageFlip
+for p=1:length(fulldata)
+    imfile=sprintf('augimg%d.png',p); %create filename
+    imwrite(fulldata{p,1}, imfile) %save augmented image file
+    fulldata{p,1}=fullfile(Folder,imfile); % replace row p, column 1 of fulldata with filepath to augmented image
+end
+
+# Resized nodule bounding box
+clear p imfile
+coordinateaug=fulldata{54,2}; %get coordinates for bounding box
+test=imread(fulldata{54,1}); %read augmented image
+imshow(test) %show augmented image
+title('Augmented Image Example')
+hold on
+rectangle('Position',coordinateaug,'EdgeColor','y','LineWidth',1) %add rectangle using coordinates for bounding box
+hold off
+
+# made datastore of augmented data for training
+imds=imageDatastore(fulldata(:,1)); %create image datastore of augmented images
+fulldata=cell2table(fulldata);
+fulldata=renamevars(fulldata,['fulldata2'],['Nodules']);
+blds=boxLabelDatastore(fulldata(:,2)); %create box label datastore of augmented boxes
+augTrainingData=combine(imds,blds); %make combined datastore to use for training 
+
+#Prepared Validation Data
+validation=load('groundtruth4.mat'); %load ground truth containing validation 
+valDataTable=objectDetectorTrainingData(validation.gTruth); %store validation data as 
+valDataTable=table2cell(valDataTable); %change validation data table to a cell array
+resizedval=resizeImageAndLabel2(valDataTable,targetSize,Folder); %resize validation images to be same size (also fix bounding boxes)
+imdsval=imageDatastore(resizedval(:,1)); %create image datastore with resized validation images
+resizedval=cell2table(resizedval); %change resized validation cell array to table
+bldsval=boxLabelDatastore(resizedval(:,2)); %create box label datastore with resized bounding boxes
+validationData=combine(imdsval,bldsval); %create validation datastore by combining imdsval and bldsval
+
+#Traning the detector
+options=trainingOptions('adam','Shuffle','every-epoch', 'ValidationData',validationData, 'L2Regularization',0.00001,MiniBatchSize=10, ValidationFrequency=3, ValidationPatience=10, MaxEpochs=12,InitialLearnRate=0.0001, LearnRateDropFactor=0.1,LearnRateDropPeriod=4,LearnRateSchedule='piecewise'); %Specify training options
+rcnn= trainFasterRCNNObjectDetector(augTrainingData,lgraph, options);
+
+# Getting DX Scan information
+Info=readtable('LIDC-IDRI_MetaData_DXOnly.xlsx'); %Import filtered Excel information (only DX information)
+LIDC=Info.SubjectID; %Make seperate matrix with Subject ID
+Folder='\\client\c$\Users\laure\Desktop\Undergrad\Sophmore Year\Spring 2022\BME3053C\PROJECT\LIDC-IDRI'; %(REPLACE WITH YOUR FILEPATH) defining starting folder where LIDC-IDRI images are contained
+filelist = dir(fullfile(Folder, '**', '*1-1.dcm*')); %create filelist with DX and CR files
+filelist=struct2table(filelist); %change Filelist from struct into table
+filenames=filelist.folder; %create seperate list of filenames only
+index=contains(filenames,LIDC); %create logical array that has 0 where CR scans are
+clear Info filelist Folder
+a=1;
+b=1;
+for ii=1:length(filenames) %get rid of CR scans, leaving only folders containing DX scans. Make filelist of XML file information for DX scans that have them
+    if index(ii)==1 %only DX scans have 1 in logical array
+        unfilt(b)=filenames(ii); %create to use in next loop for filtering LIDC
+        x=dir(fullfile(filenames{ii},'*.xml')); %the point of this line is to allow us to see if an xml exists in the folder path that is specified 
+        b=b+1;
+        if isempty(x)==0 %if x is not empty
+            DXfilenames(a)=filenames(ii); %add the filename to DXfilenames only if an xml exists
+            X(a)=x; %add the x to variable X (used later)
+            a=a+1;
+        end
+    end
+end
+
+#Update subject ID to contain information only for DX scans that have xml
+e=1;
+for jj=1:length(LIDC) %create new LIDC list that only contains LIDC for DX scans with XML
+    x2=dir(fullfile(unfilt{jj},'*xml*'));
+    if isempty(x2)==0 %if there is no associated xml
+        LIDCfiltered(e)=LIDC(jj); %update LIDCfiltered to include the specified LIDC
+        e=e+1;
+    end
+end
+clear x2 a b e jj ii filenames index unfilt
+
+#getting number of nodules from xml files
+X2=struct2table(X); %change to a table
+Xmlnames=X2.name; %create variable with xml names 
+Xmlfolder=X2.folder; %create variable with xml folders 
+for mm=1:length(X)
+    xml=readstruct(fullfile(Xmlfolder{mm},Xmlnames{mm})); %read xml 
+    B=isfield(xml,'CXRreadingSession'); %check if the xml contains 'CXRreadingSession'
+    if B==1 %if xml has 'CXRreadingSession'
+        C=isstruct(xml.CXRreadingSession(1)); %check if information exists in the CXRreadingSession
+        if C==1 %if information exists in the CXRReadingSession
+             xmlnodule(mm)=size(xml.CXRreadingSession(1).unblindedRead,2); % number of nodules is the size of xml.CXRreadingSession(1).unblidedRead, second dimension
+        else %if information does not exist in CXRreadingSession
+            xmlnodule(mm)=0; %put that there are 0 nodules
+        end
+    else %if there is no 'CXRreadingSession'
+        xmlnodule(mm)=0; %put that there are 0 nodules
+    end
+end
+clear X2 B C mm x  xml
+Read DX scans into MATLAB and resize
+for k=1:length(DXfilenames) %Read all DX images (in order by LIDC number) and adjust the images
+    currentimage=dicomread(fullfile(DXfilenames{k},'1-1.dcm')); %read DX 
+    currentimage=imresize(currentimage,[227 227]); %resize image
+    currentimage=mat2gray(currentimage); %convert to grayscale
+    currentimage=imadjust(currentimage); %adjust image
+    currentimage=repmat(currentimage, [1, 1, 3]); %make image three channels
+    DX{k}=uint8(255*currentimage); %change to uint8
+end
+clear currentimage k 
+
+#Using RCNN to detect nodules
+for ll=1:length(DX)
+    [bbox,scores,label]=detect(rcnn,DX{ll}); %use rcnn to detect nodules
+    box{ll}=bbox(scores>0.66,:); %store bouding box information for bbox with score>0.66
+    compnod(ll)=size(box{ll},1); %identify number of nodules in DX scan with score>0.66
+end
+
+# Visualizing results
+coordinates=box{6}; %define coordinates as the bouding boxes for DX{6}
+imshow(DX{6}) %show DX{6}
+hold on
+title('DX6 predicted nodules')
+for b=1:size(coordinates,1)  %this loop allows all bounding boxes to be displayed on the image
+    coordinatescurrent=coordinates(b,:); %define current coordinates
+    rectangle('Position',coordinatescurrent,'EdgeColor','y','LineWidth',1) %add rectangle where bounding box is
+end
+hold off
+
+coordinates=box{117}; %define coordinates as the bounding boxes for DX{117}
+imshow(DX{117}) %show DX{117}
+hold on
+title('DX117 predicted nodules')
+for b=1:size(coordinates,1) %this loop allows all bounding boxes to be shown on the image
+    coordinatescurrent=coordinates(b,:); %define current coordinates
+    rectangle('Position',coordinatescurrent,'EdgeColor','y','LineWidth',1) %add rectangle where bounding box is
+end
+hold off
+
+#Comparing number of nodules
+a=0;
+b=0;
+c=0;
+for p=1:length(compnod)
+    realnod=xmlnodule(p);
+    predictednod=compnod(p);
+    if predictednod<=realnod+1 && predictednod>=realnod-1
+        a=a+1; % a will be used to represent number of images with an acceptable number of nodules predicted
+    elseif predictednod>realnod+1
+        b=b+1; % b will be used to represent number of images with too many predicted nodules
+    elseif predictednod<realnod-1
+        c=c+1; % c will be used to represent number of images with too few nodules
+    end
+end
+Expected_WithinOneNodule=(a*100)/244; %percent of predicted nodules that are +/- 1 nodules from real number of nodules
+Over=(b*100)/224; %percent of predicted nodules that are greater than 1 nodules over the real number of nodules
+Under=(c*100)/224; %percent of predicted nodules that are less than 1 nodules under the real number of nodules
+Percentages=table(Expected_WithinOneNodule,Over,Under)
+
+
+#Functions
+function data = resizeImageAndLabel(trainingDataTable,targetSize,Folder)
+    for t=1:length(trainingDataTable)
+         filenameimg=sprintf('%d.png',t); %assign filename
+         scale = targetSize./size(imread(trainingDataTable{t,1}),[1 2]); %figure out scale using targetSize and current image
+         if isfile(filenameimg)==0 %filename does not exist (adjust and save the image to the computer in this loop)
+              data{t,1} = imresize(imread(trainingDataTable{t,1}),targetSize); %resize the image
+              data{t,1}=mat2gray(data{t,1}); %change to grayscale
+              data{t,1}=imadjust(data{t,1}); %adjust contrast of image
+              data{t,1}=repmat(data{t,1}, [1, 1, 3]); %change image to three channels
+              data{t,1}=uint8(255*data{t,1}); %change to uint8
+              imwrite(data{t,1},filenameimg) %save image to computer
+         end
+        data{t,1}=fullfile(Folder,filenameimg); %replace data{t,1} with full file path
+        data{t,2}=bboxresize(trainingDataTable{t,2},scale); %resize bounding boxes
+    end
+end
+
+function data=resizeImageAndLabel2(valDataTable,targetSize,Folder)
+    for t=1:length(valDataTable)
+         filenameimg=sprintf('a%d.png',t); %assign filename 
+         scale = targetSize./size(imread(valDataTable{t,1}),[1 2]); %figure out scale using targetSize and size of current image
+         if isfile(filenameimg)==0 %filename does not exist (adjust image and save the image to the computer in this loop)
+              data{t,1}=imresize(imread(valDataTable{t,1}),targetSize); %resize the image
+              data{t,1}=mat2gray(data{t,1}); %change to grayscale
+              data{t,1}=imadjust(data{t,1}); %adjust brightness 
+              data{t,1}=repmat(data{t,1}, [1, 1, 3]); %change image from one channel to three
+              data{t,1}=uint8(255*data{t,1}); %convert to uint8
+             imwrite(data{t,1},filenameimg) %save image to computer
+         end
+        data{t,1}=fullfile(Folder,filenameimg); %replace data{t,1} with full file path to the image 
+        data{t,2}=bboxresize(valDataTable{t,2},scale); %resize the bounding boxes
+    end
+end
+
+
+function out=imageFlip(data)
+         I=data{:,1}; %set I equal to information from first column of data
+         boxes=data{:,2}; %set boxes equal to information from second column of data
+         labels=data{:,3}; %set labels equal to information from third column of dataI
+         tform=randomAffine2d('XReflection',true,'YReflection',true,'Rotation',[-25 25]); %random transformation that can include reflection about x axis and rotation
+         rout=affineOutputView(size(I),tform); 
+         augmentedImage=imwarp(I,tform,"OutputView",rout); %adjust the images with augmentations
+         [augmentedBoxes,valid]=bboxwarp(boxes,tform,rout); %adjust bounding boxes to match images
+         augmentedLabels=labels(valid); 
+         out={augmentedImage,augmentedBoxes,augmentedLabels}; %specify information that is output of function
+ 
+end
